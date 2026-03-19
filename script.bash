@@ -148,8 +148,31 @@ parse_args() {
 
 prepare_system() {
   log "Installing dependencies"
+
   run_as_root apt update
-  run_as_root apt install -y docker.io docker-compose-plugin curl xxd cron
+  run_as_root apt install -y ca-certificates curl xxd cron
+
+  if ! grep -qs "download.docker.com" /etc/apt/sources.list.d/docker.sources 2>/dev/null; then
+    log "Adding Docker apt repository"
+    run_as_root install -m 0755 -d /etc/apt/keyrings
+    run_as_root curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    run_as_root chmod a+r /etc/apt/keyrings/docker.asc
+
+    run_as_root bash -lc 'cat > /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: '"$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")"'
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF'
+  fi
+
+  log "Removing conflicting packages if present"
+  run_as_root apt remove -y docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc || true
+
+  run_as_root apt update
+  run_as_root apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
   run_as_root systemctl enable --now docker
   run_as_root systemctl enable --now cron || true
 }
