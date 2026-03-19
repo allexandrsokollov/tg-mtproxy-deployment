@@ -4,8 +4,15 @@ set -euo pipefail
 WORKDIR="${WORKDIR:-$HOME/mtproxy}"
 IMAGE="${IMAGE:-telegrammessenger/proxy:latest}"
 NAME_PREFIX="${NAME_PREFIX:-mtproxy}"
+
+LB_NAME="${LB_NAME:-mtproxy-lb}"
+LB_IMAGE="${LB_IMAGE:-nginx:stable}"
+LB_PORT="${LB_PORT:-443}"
+ENABLE_LB="${ENABLE_LB:-yes}"
+
 USE_DD_SECRET="${USE_DD_SECRET:-yes}"
 
+PORT_RANGE=""
 PORT_START=""
 PORT_END=""
 COUNT=""
@@ -21,19 +28,23 @@ err() {
 usage() {
   cat <<EOF
 Usage:
-  $0 --port-range START-END [--prefix NAME] [--workdir PATH]
+  $0 --port-range START-END [options]
 
 Examples:
   $0 --port-range 4000-4009
-  $0 --port-range 3443-3452 --prefix proxy
-  $0 --port-range 5000-5004 --workdir /opt/mtproxy
+  $0 --port-range 5000-5009 --lb-port 443
+  $0 --port-range 30000-30009 --prefix proxy --lb-port 8443
 
 Options:
-  --port-range START-END   Required. One port per container.
-  --prefix NAME            Container prefix. Default: mtproxy
+  --port-range START-END   Required. One host port per proxy container.
+  --lb-port PORT           Load balancer public port. Default: 443
+  --prefix NAME            Proxy container prefix. Default: mtproxy
   --workdir PATH           Working directory. Default: ~/mtproxy
-  --image IMAGE            Docker image. Default: telegrammessenger/proxy:latest
+  --image IMAGE            Proxy docker image. Default: telegrammessenger/proxy:latest
+  --lb-image IMAGE         LB docker image. Default: nginx:stable
   --dd-secret yes|no       Prefix client secret with dd. Default: yes
+  --enable-lb yes|no       Start NGINX load balancer. Default: yes
+  -h, --help               Show help
 EOF
 }
 
@@ -56,6 +67,10 @@ parse_args() {
         PORT_RANGE="${2:-}"
         shift 2
         ;;
+      --lb-port)
+        LB_PORT="${2:-}"
+        shift 2
+        ;;
       --prefix)
         NAME_PREFIX="${2:-}"
         shift 2
@@ -68,8 +83,16 @@ parse_args() {
         IMAGE="${2:-}"
         shift 2
         ;;
+      --lb-image)
+        LB_IMAGE="${2:-}"
+        shift 2
+        ;;
       --dd-secret)
         USE_DD_SECRET="${2:-}"
+        shift 2
+        ;;
+      --enable-lb)
+        ENABLE_LB="${2:-}"
         shift 2
         ;;
       -h|--help)
@@ -109,12 +132,24 @@ parse_args() {
     exit 1
   fi
 
+  if (( LB_PORT < 1 || LB_PORT > 65535 )); then
+    err "LB port must be between 1 and 65535"
+    exit 1
+  fi
+
+  if [[ "$ENABLE_LB" == "yes" ]] && (( LB_PORT >= PORT_START && LB_PORT <= PORT_END )); then
+    err "LB port ${LB_PORT} conflicts with proxy port range ${PORT_START}-${PORT_END}"
+    err "Choose a load balancer port outside the proxy range"
+    exit 1
+  fi
+
   COUNT=$((PORT_END - PORT_START + 1))
 }
 
 prepare_system() {
+  log "Installing dependencies"
   run_as_root apt update
-  run_as_root apt install -y docker.io curl xxd cron
+  run_as_root apt install -y docker.io docker-compose-plugin curl xxd cron
   run_as_root systemctl enable --now docker
   run_as_root systemctl enable --now cron || true
 }
@@ -154,8 +189,8 @@ load_secret() {
   fi
 }
 
-prune_previous_containers() {
-  log "Removing previous containers with prefix ${NAME_PREFIX}-"
+prune_previous_proxies() {
+  log "Removing previous proxy containers with prefix ${NAME_PREFIX}-"
   local ids
   ids="$(run_as_root docker ps -aq --filter "name=^${NAME_PREFIX}-[0-9]+$" || true)"
 
@@ -163,8 +198,13 @@ prune_previous_containers() {
     # shellcheck disable=SC2086
     run_as_root docker rm -f $ids
   else
-    log "No previous containers found"
+    log "No previous proxy containers found"
   fi
+}
+
+prune_previous_lb() {
+  log "Removing previous load balancer container if it exists"
+  run_as_root docker rm -f "$LB_NAME" >/dev/null 2>&1 || true
 }
 
 open_port() {
@@ -189,8 +229,6 @@ deploy_one() {
     -v "$WORKDIR/proxy-multi.conf:/data/proxy-multi.conf:ro" \
     -e SECRET="$SECRET" \
     "$IMAGE" >/dev/null
-
-  open_port "$port"
 }
 
 deploy_from_port_range() {
@@ -203,7 +241,87 @@ deploy_from_port_range() {
   done
 }
 
+write_nginx_cfg() {
+  log "Writing NGINX load balancer config"
+
+  {
+    cat <<EOF
+worker_processes auto;
+
+events {
+    worker_connections 4096;
+}
+
+stream {
+    upstream mtproxy_backend {
+EOF
+
+    local port
+    for ((port=PORT_START; port<=PORT_END; port++)); do
+      echo "        server host.docker.internal:${port};"
+    done
+
+    cat <<EOF
+    }
+
+    server {
+        listen ${LB_PORT};
+        proxy_connect_timeout 5s;
+        proxy_timeout 2m;
+        proxy_pass mtproxy_backend;
+    }
+}
+EOF
+  } > "$WORKDIR/nginx.conf"
+}
+
+write_lb_compose() {
+  log "Writing docker-compose.yml for NGINX load balancer"
+  cat > "$WORKDIR/docker-compose.yml" <<EOF
+services:
+  ${LB_NAME}:
+    image: ${LB_IMAGE}
+    container_name: ${LB_NAME}
+    restart: unless-stopped
+    ports:
+      - "${LB_PORT}:${LB_PORT}"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+EOF
+}
+
+compose_cmd() {
+  if docker compose version >/dev/null 2>&1; then
+    echo "docker compose"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    echo "docker-compose"
+  else
+    err "Neither 'docker compose' nor 'docker-compose' is available"
+    exit 1
+  fi
+}
+
+start_lb() {
+  [[ "$ENABLE_LB" == "yes" ]] || return 0
+
+  write_nginx_cfg
+  write_lb_compose
+
+  log "Starting load balancer on port ${LB_PORT}"
+  local dc
+  dc="$(compose_cmd)"
+  (
+    cd "$WORKDIR"
+    run_as_root bash -lc "$dc up -d"
+  )
+
+  open_port "$LB_PORT"
+}
+
 install_refresh_cron() {
+  log "Installing daily config refresh cron"
   local cron_line
   cron_line="0 4 * * * cd $WORKDIR && curl -fsS https://core.telegram.org/getProxyConfig -o proxy-multi.conf && sudo docker restart \$(sudo docker ps -q --filter 'name=^${NAME_PREFIX}-[0-9]+$') >/dev/null 2>&1"
 
@@ -213,7 +331,7 @@ install_refresh_cron() {
   ) | crontab -
 }
 
-print_links() {
+print_result() {
   local ip client_secret
   ip="$(get_public_ip)"
   [[ -n "$ip" ]] || ip="<YOUR_SERVER_IP>"
@@ -225,16 +343,33 @@ print_links() {
   fi
 
   echo
-  echo "Deployed ${COUNT} containers"
+  echo "========================================"
+  echo "Deployed ${COUNT} proxy containers"
+  echo "Proxy range: ${PORT_START}-${PORT_END}"
   echo "Shared client secret: ${client_secret}"
+  echo "========================================"
   echo
 
+  if [[ "$ENABLE_LB" == "yes" ]]; then
+    echo "Load balancer link:"
+    echo "tg://proxy?server=${ip}&port=${LB_PORT}&secret=${client_secret}"
+    echo
+  fi
+
+  echo "Direct links:"
   local port
   local index=1
   for ((port=PORT_START; port<=PORT_END; port++)); do
     echo "${NAME_PREFIX}-${index}: tg://proxy?server=${ip}&port=${port}&secret=${client_secret}"
     ((index++))
   done
+
+  echo
+  echo "Useful commands:"
+  echo "  sudo docker ps"
+  echo "  sudo docker logs ${LB_NAME}"
+  echo "  sudo docker logs ${NAME_PREFIX}-1"
+  echo "========================================"
 }
 
 main() {
@@ -242,10 +377,12 @@ main() {
   prepare_system
   prepare_files
   load_secret
-  prune_previous_containers
+  prune_previous_proxies
+  prune_previous_lb
   deploy_from_port_range
+  start_lb
   install_refresh_cron
-  print_links
+  print_result
 }
 
 main "$@"
