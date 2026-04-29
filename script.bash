@@ -11,6 +11,7 @@ LB_PORT="${LB_PORT:-443}"
 ENABLE_LB="${ENABLE_LB:-yes}"
 
 USE_DD_SECRET="${USE_DD_SECRET:-yes}"
+CUSTOM_SECRET=""
 
 PORT_RANGE=""
 PORT_START=""
@@ -34,9 +35,12 @@ Examples:
   $0 --port-range 4000-4009
   $0 --port-range 5000-5009 --lb-port 443
   $0 --port-range 30000-30009 --prefix proxy --lb-port 8443
+  $0 --port-range 4000-4009 --secret 0123456789abcdef0123456789abcdef
 
 Options:
   --port-range START-END   Required. One host port per proxy container.
+  --secret SECRET          Custom shared secret. Must be 32 hex chars.
+                           A leading dd prefix is accepted and stripped.
   --lb-port PORT           Load balancer public port. Default: 443
   --prefix NAME            Proxy container prefix. Default: mtproxy
   --workdir PATH           Working directory. Default: ~/mtproxy
@@ -69,6 +73,10 @@ parse_args() {
         ;;
       --lb-port)
         LB_PORT="${2:-}"
+        shift 2
+        ;;
+      --secret)
+        CUSTOM_SECRET="${2:-}"
         shift 2
         ;;
       --prefix)
@@ -130,6 +138,23 @@ parse_args() {
   if (( PORT_START > PORT_END )); then
     err "Port range start must be <= end"
     exit 1
+  fi
+
+  if [[ -n "$CUSTOM_SECRET" ]]; then
+    CUSTOM_SECRET="${CUSTOM_SECRET//$'\r'/}"
+    CUSTOM_SECRET="${CUSTOM_SECRET//$'\n'/}"
+
+    if [[ "$CUSTOM_SECRET" =~ ^[dD][dD]([0-9a-fA-F]{32})$ ]]; then
+      CUSTOM_SECRET="${BASH_REMATCH[1]}"
+    fi
+
+    if [[ ! "$CUSTOM_SECRET" =~ ^[0-9a-fA-F]{32}$ ]]; then
+      err "Invalid secret: must be 32 hex characters"
+      err "If you pass a client secret with a leading dd prefix, it must be dd plus 32 hex characters"
+      exit 1
+    fi
+
+    CUSTOM_SECRET="${CUSTOM_SECRET,,}"
   fi
 
   if (( LB_PORT < 1 || LB_PORT > 65535 )); then
@@ -195,7 +220,11 @@ prepare_files() {
     log "proxy-multi.conf already exists, keeping it"
   fi
 
-  if [[ ! -f mtproxy-secret ]]; then
+  if [[ -n "$CUSTOM_SECRET" ]]; then
+    log "Writing custom shared secret"
+    printf '%s\n' "$CUSTOM_SECRET" > mtproxy-secret
+    chmod 600 mtproxy-secret
+  elif [[ ! -f mtproxy-secret ]]; then
     log "Generating shared secret"
     head -c 16 /dev/urandom | xxd -ps -c 16 > mtproxy-secret
     chmod 600 mtproxy-secret

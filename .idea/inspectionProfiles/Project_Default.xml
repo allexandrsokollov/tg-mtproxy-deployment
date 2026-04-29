@@ -1,0 +1,74 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyCompatibilityInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ourVersions">
+        <value>
+          <list size="2">
+            <item index="0" class="java.lang.String" itemvalue="3.14" />
+            <item index="1" class="java.lang.String" itemvalue="3.13" />
+          </list>
+        </value>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="alembic" />
+          <option value="annotated-types" />
+          <option value="anyio" />
+          <option value="asyncpg" />
+          <option value="black" />
+          <option value="certifi" />
+          <option value="cffi" />
+          <option value="charset-normalizer" />
+          <option value="click" />
+          <option value="cryptography" />
+          <option value="fastapi" />
+          <option value="gitdb" />
+          <option value="gitpython" />
+          <option value="h11" />
+          <option value="httpcore" />
+          <option value="httpx" />
+          <option value="hvac" />
+          <option value="idna" />
+          <option value="iniconfig" />
+          <option value="jinja2" />
+          <option value="mako" />
+          <option value="markupsafe" />
+          <option value="mypy" />
+          <option value="mypy-extensions" />
+          <option value="nats-py" />
+          <option value="packaging" />
+          <option value="pathspec" />
+          <option value="platformdirs" />
+          <option value="pluggy" />
+          <option value="prometheus-client" />
+          <option value="pycparser" />
+          <option value="pydantic" />
+          <option value="pydantic-core" />
+          <option value="pydantic-settings" />
+          <option value="pygments" />
+          <option value="pytest" />
+          <option value="python-dotenv" />
+          <option value="pytokens" />
+          <option value="pyyaml" />
+          <option value="pyyml" />
+          <option value="requests" />
+          <option value="ruff" />
+          <option value="smmap" />
+          <option value="sniffio" />
+          <option value="sqlalchemy" />
+          <option value="starlette" />
+          <option value="types-hvac" />
+          <option value="types-pyyaml" />
+          <option value="types-requests" />
+          <option value="typing-extensions" />
+          <option value="typing-inspection" />
+          <option value="urllib3" />
+          <option value="uvicorn" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
