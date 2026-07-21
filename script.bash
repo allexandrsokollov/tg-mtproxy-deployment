@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="${WORKDIR:-$HOME/mtproxy}"
-IMAGE="${IMAGE:-telegrammessenger/proxy:latest}"
+IMAGE="${IMAGE:-tg-mtproxy:local}"
 NAME_PREFIX="${NAME_PREFIX:-mtproxy}"
+BUILD_LOCAL_IMAGE="${BUILD_LOCAL_IMAGE:-yes}"
+MTPROXY_COMMIT="${MTPROXY_COMMIT:-cafc3380a81671579ce366d0594b9a8e450827e9}"
+MTPROXY_PLATFORM="${MTPROXY_PLATFORM:-linux/amd64}"
 PULL_POLICY="${PULL_POLICY:-missing}"
 PULL_RETRIES="${PULL_RETRIES:-3}"
 PULL_RETRY_DELAY="${PULL_RETRY_DELAY:-5}"
 
 LB_NAME="${LB_NAME:-mtproxy-lb}"
-LB_IMAGE="${LB_IMAGE:-nginx:stable}"
+LB_IMAGE="${LB_IMAGE:-tg-mtproxy-nginx:local}"
+BUILD_LOCAL_LB_IMAGE="${BUILD_LOCAL_LB_IMAGE:-yes}"
 LB_PORT="${LB_PORT:-443}"
 ENABLE_LB="${ENABLE_LB:-yes}"
 
 USE_DD_SECRET="${USE_DD_SECRET:-yes}"
 CUSTOM_SECRET=""
+PUBLIC_IP="${PUBLIC_IP:-}"
 
 PORT_RANGE=""
 PORT_START=""
@@ -44,11 +50,16 @@ Options:
   --port-range START-END   Required. One host port per proxy container.
   --secret SECRET          Custom shared secret. Must be 32 hex chars.
                            A leading dd prefix is accepted and stripped.
+  --public-ip IP           Public IPv4 address. Detected automatically by default.
   --lb-port PORT           Load balancer public port. Default: 443
   --prefix NAME            Proxy container prefix. Default: mtproxy
   --workdir PATH           Working directory. Default: ~/mtproxy
-  --image IMAGE            Proxy docker image. Default: telegrammessenger/proxy:latest
-  --lb-image IMAGE         LB docker image. Default: nginx:stable
+  --image IMAGE            Proxy image/tag. Default: tg-mtproxy:local
+  --build-local-image yes|no
+                           Build from Telegram's official source. Default: yes
+  --mtproxy-commit SHA     Official source commit to build.
+  --lb-image IMAGE         LB image/tag. Default: tg-mtproxy-nginx:local
+  --build-local-lb yes|no  Build the NGINX load balancer locally. Default: yes
   --pull-policy POLICY     Image policy: missing, always, or never. Default: missing
   --pull-retries N         Retries after a transient pull failure. Default: 3
   --dd-secret yes|no       Prefix client secret with dd. Default: yes
@@ -69,6 +80,31 @@ get_public_ip() {
   curl -4 -fsS https://api.ipify.org || true
 }
 
+validate_ipv4() {
+  local ip="$1"
+  local octet
+  local -a octets
+
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -r -a octets <<< "$ip"
+  for octet in "${octets[@]}"; do
+    (( 10#$octet <= 255 )) || return 1
+  done
+}
+
+resolve_public_ip() {
+  if [[ -z "$PUBLIC_IP" ]]; then
+    log "Detecting public IPv4 address"
+    PUBLIC_IP="$(get_public_ip)"
+  fi
+
+  if ! validate_ipv4 "$PUBLIC_IP"; then
+    err "Unable to determine a valid public IPv4 address"
+    err "Pass it explicitly with --public-ip IP"
+    return 1
+  fi
+}
+
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -84,6 +120,10 @@ parse_args() {
         CUSTOM_SECRET="${2:-}"
         shift 2
         ;;
+      --public-ip)
+        PUBLIC_IP="${2:-}"
+        shift 2
+        ;;
       --prefix)
         NAME_PREFIX="${2:-}"
         shift 2
@@ -96,8 +136,20 @@ parse_args() {
         IMAGE="${2:-}"
         shift 2
         ;;
+      --build-local-image)
+        BUILD_LOCAL_IMAGE="${2:-}"
+        shift 2
+        ;;
+      --mtproxy-commit)
+        MTPROXY_COMMIT="${2:-}"
+        shift 2
+        ;;
       --lb-image)
         LB_IMAGE="${2:-}"
+        shift 2
+        ;;
+      --build-local-lb)
+        BUILD_LOCAL_LB_IMAGE="${2:-}"
         shift 2
         ;;
       --pull-policy)
@@ -191,6 +243,29 @@ parse_args() {
       ;;
   esac
 
+  case "$BUILD_LOCAL_IMAGE" in
+    yes|no)
+      ;;
+    *)
+      err "--build-local-image must be yes or no"
+      exit 1
+      ;;
+  esac
+
+  case "$BUILD_LOCAL_LB_IMAGE" in
+    yes|no)
+      ;;
+    *)
+      err "--build-local-lb must be yes or no"
+      exit 1
+      ;;
+  esac
+
+  if [[ "$BUILD_LOCAL_IMAGE" == "yes" && ! "$MTPROXY_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    err "MTProxy commit must be a full 40-character hexadecimal Git commit"
+    exit 1
+  fi
+
   if [[ ! "$PULL_RETRIES" =~ ^[0-9]+$ ]]; then
     err "Pull retries must be a non-negative integer"
     exit 1
@@ -238,6 +313,88 @@ EOF'
 image_exists() {
   local image="$1"
   run_as_root docker image inspect "$image" >/dev/null 2>&1
+}
+
+build_local_proxy_image() {
+  local dockerfile="${SCRIPT_DIR}/docker/mtproxy.Dockerfile"
+  local context="${SCRIPT_DIR}/docker"
+
+  if [[ ! -f "$dockerfile" || ! -f "${context}/mtproxy-entrypoint.bash" ]]; then
+    err "Local MTProxy build files were not found under ${context}"
+    err "Run this script from a complete checkout of the deployment repository"
+    return 1
+  fi
+
+  log "Building ${IMAGE} from TelegramMessenger/MTProxy commit ${MTPROXY_COMMIT}"
+  run_as_root docker build \
+    --platform "$MTPROXY_PLATFORM" \
+    --build-arg "MTPROXY_COMMIT=${MTPROXY_COMMIT}" \
+    --file "$dockerfile" \
+    --tag "$IMAGE" \
+    "$context"
+}
+
+ensure_local_proxy_image() {
+  case "$PULL_POLICY" in
+    missing)
+      if image_exists "$IMAGE"; then
+        log "Using cached locally built image ${IMAGE}"
+        return 0
+      fi
+      build_local_proxy_image
+      ;;
+    always)
+      build_local_proxy_image
+      ;;
+    never)
+      if image_exists "$IMAGE"; then
+        log "Using cached locally built image ${IMAGE}"
+        return 0
+      fi
+      err "Locally built image ${IMAGE} is missing and pull policy is 'never'"
+      return 1
+      ;;
+  esac
+}
+
+build_local_lb_image() {
+  local dockerfile="${SCRIPT_DIR}/docker/nginx.Dockerfile"
+
+  if [[ ! -f "$dockerfile" ]]; then
+    err "Local NGINX Dockerfile was not found: ${dockerfile}"
+    err "Run this script from a complete checkout of the deployment repository"
+    return 1
+  fi
+
+  log "Building local NGINX load balancer image ${LB_IMAGE}"
+  run_as_root docker build \
+    --platform "$MTPROXY_PLATFORM" \
+    --file "$dockerfile" \
+    --tag "$LB_IMAGE" \
+    "${SCRIPT_DIR}/docker"
+}
+
+ensure_local_lb_image() {
+  case "$PULL_POLICY" in
+    missing)
+      if image_exists "$LB_IMAGE"; then
+        log "Using cached locally built image ${LB_IMAGE}"
+        return 0
+      fi
+      build_local_lb_image
+      ;;
+    always)
+      build_local_lb_image
+      ;;
+    never)
+      if image_exists "$LB_IMAGE"; then
+        log "Using cached locally built image ${LB_IMAGE}"
+        return 0
+      fi
+      err "Locally built image ${LB_IMAGE} is missing and pull policy is 'never'"
+      return 1
+      ;;
+  esac
 }
 
 is_retryable_pull_error() {
@@ -313,10 +470,18 @@ ensure_image() {
 
 prepare_images() {
   log "Checking required Docker images"
-  ensure_image "$IMAGE" || return 1
+  if [[ "$BUILD_LOCAL_IMAGE" == "yes" ]]; then
+    ensure_local_proxy_image || return 1
+  else
+    ensure_image "$IMAGE" || return 1
+  fi
 
   if [[ "$ENABLE_LB" == "yes" ]]; then
-    ensure_image "$LB_IMAGE" || return 1
+    if [[ "$BUILD_LOCAL_LB_IMAGE" == "yes" ]]; then
+      ensure_local_lb_image || return 1
+    else
+      ensure_image "$LB_IMAGE" || return 1
+    fi
   fi
 }
 
@@ -399,6 +564,7 @@ deploy_one() {
     -v "$WORKDIR/proxy-secret:/data/secret:ro" \
     -v "$WORKDIR/proxy-multi.conf:/data/proxy-multi.conf:ro" \
     -e SECRET="$SECRET" \
+    -e EXTERNAL_IP="$PUBLIC_IP" \
     "$IMAGE" >/dev/null
 }
 
@@ -416,6 +582,11 @@ write_nginx_cfg() {
   log "Writing NGINX load balancer config"
 
   {
+    if [[ "$BUILD_LOCAL_LB_IMAGE" == "yes" ]]; then
+      echo "load_module /usr/lib64/nginx/modules/ngx_stream_module.so;"
+      echo
+    fi
+
     cat <<EOF
 worker_processes auto;
 
@@ -505,8 +676,7 @@ install_refresh_cron() {
 
 print_result() {
   local ip client_secret
-  ip="$(get_public_ip)"
-  [[ -n "$ip" ]] || ip="<YOUR_SERVER_IP>"
+  ip="$PUBLIC_IP"
 
   if [[ "$USE_DD_SECRET" == "yes" ]]; then
     client_secret="dd${SECRET}"
@@ -550,6 +720,7 @@ main() {
   prepare_images || return 1
   prepare_files
   load_secret
+  resolve_public_ip || return 1
   prune_previous_proxies
   prune_previous_lb
   deploy_from_port_range
