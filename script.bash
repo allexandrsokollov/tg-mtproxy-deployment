@@ -4,6 +4,9 @@ set -euo pipefail
 WORKDIR="${WORKDIR:-$HOME/mtproxy}"
 IMAGE="${IMAGE:-telegrammessenger/proxy:latest}"
 NAME_PREFIX="${NAME_PREFIX:-mtproxy}"
+PULL_POLICY="${PULL_POLICY:-missing}"
+PULL_RETRIES="${PULL_RETRIES:-3}"
+PULL_RETRY_DELAY="${PULL_RETRY_DELAY:-5}"
 
 LB_NAME="${LB_NAME:-mtproxy-lb}"
 LB_IMAGE="${LB_IMAGE:-nginx:stable}"
@@ -46,6 +49,8 @@ Options:
   --workdir PATH           Working directory. Default: ~/mtproxy
   --image IMAGE            Proxy docker image. Default: telegrammessenger/proxy:latest
   --lb-image IMAGE         LB docker image. Default: nginx:stable
+  --pull-policy POLICY     Image policy: missing, always, or never. Default: missing
+  --pull-retries N         Retries after a transient pull failure. Default: 3
   --dd-secret yes|no       Prefix client secret with dd. Default: yes
   --enable-lb yes|no       Start NGINX load balancer. Default: yes
   -h, --help               Show help
@@ -93,6 +98,14 @@ parse_args() {
         ;;
       --lb-image)
         LB_IMAGE="${2:-}"
+        shift 2
+        ;;
+      --pull-policy)
+        PULL_POLICY="${2:-}"
+        shift 2
+        ;;
+      --pull-retries)
+        PULL_RETRIES="${2:-}"
         shift 2
         ;;
       --dd-secret)
@@ -168,6 +181,26 @@ parse_args() {
     exit 1
   fi
 
+  case "$PULL_POLICY" in
+    missing|always|never)
+      ;;
+    *)
+      err "Invalid pull policy: $PULL_POLICY"
+      err "Expected one of: missing, always, never"
+      exit 1
+      ;;
+  esac
+
+  if [[ ! "$PULL_RETRIES" =~ ^[0-9]+$ ]]; then
+    err "Pull retries must be a non-negative integer"
+    exit 1
+  fi
+
+  if [[ ! "$PULL_RETRY_DELAY" =~ ^[0-9]+$ ]]; then
+    err "Pull retry delay must be a non-negative integer"
+    exit 1
+  fi
+
   COUNT=$((PORT_END - PORT_START + 1))
 }
 
@@ -200,6 +233,91 @@ EOF'
 
   run_as_root systemctl enable --now docker
   run_as_root systemctl enable --now cron || true
+}
+
+image_exists() {
+  local image="$1"
+  run_as_root docker image inspect "$image" >/dev/null 2>&1
+}
+
+is_retryable_pull_error() {
+  local output="$1"
+  grep -Eqi \
+    '429|too many requests|timeout|timed out|temporary failure|connection reset|connection refused|tls handshake timeout|unexpected eof|i/o timeout|service unavailable|502 bad gateway|503 service unavailable|504 gateway timeout' \
+    <<< "$output"
+}
+
+pull_image() {
+  local image="$1"
+  local attempt=1
+  local max_attempts=$((PULL_RETRIES + 1))
+  local delay="$PULL_RETRY_DELAY"
+  local output
+
+  while (( attempt <= max_attempts )); do
+    log "Pulling image ${image} (attempt ${attempt}/${max_attempts})"
+
+    if output="$(run_as_root docker pull "$image" 2>&1)"; then
+      [[ -z "$output" ]] || echo "$output"
+      return 0
+    fi
+
+    err "$output"
+
+    if (( attempt >= max_attempts )) || ! is_retryable_pull_error "$output"; then
+      break
+    fi
+
+    log "Transient image pull failure; retrying in ${delay}s"
+    sleep "$delay"
+    ((attempt++))
+
+    if (( delay < 60 )); then
+      delay=$((delay * 2))
+      (( delay <= 60 )) || delay=60
+    fi
+  done
+
+  err "Unable to obtain Docker image: ${image}"
+  if grep -Eqi '429|too many requests' <<< "$output"; then
+    err "Docker Hub rate-limited this server. Try 'docker login', wait for the limit to clear,"
+    err "or pass --image with a trusted registry mirror. A cached image can be used with --pull-policy missing."
+  fi
+  return 1
+}
+
+ensure_image() {
+  local image="$1"
+
+  case "$PULL_POLICY" in
+    missing)
+      if image_exists "$image"; then
+        log "Using cached image ${image}"
+        return 0
+      fi
+      pull_image "$image"
+      ;;
+    always)
+      pull_image "$image"
+      ;;
+    never)
+      if image_exists "$image"; then
+        log "Using cached image ${image}"
+        return 0
+      fi
+      err "Image ${image} is not available locally and pull policy is 'never'"
+      return 1
+      ;;
+  esac
+}
+
+prepare_images() {
+  log "Checking required Docker images"
+  ensure_image "$IMAGE" || return 1
+
+  if [[ "$ENABLE_LB" == "yes" ]]; then
+    ensure_image "$LB_IMAGE" || return 1
+  fi
 }
 
 prepare_files() {
@@ -276,6 +394,7 @@ deploy_one() {
   run_as_root docker run -d \
     --name "$name" \
     --restart unless-stopped \
+    --pull never \
     -p "${port}:443" \
     -v "$WORKDIR/proxy-secret:/data/secret:ro" \
     -v "$WORKDIR/proxy-multi.conf:/data/proxy-multi.conf:ro" \
@@ -333,6 +452,7 @@ write_lb_compose() {
 services:
   ${LB_NAME}:
     image: ${LB_IMAGE}
+    pull_policy: never
     container_name: ${LB_NAME}
     restart: unless-stopped
     ports:
@@ -427,6 +547,7 @@ print_result() {
 main() {
   parse_args "$@"
   prepare_system
+  prepare_images || return 1
   prepare_files
   load_secret
   prune_previous_proxies
@@ -437,4 +558,6 @@ main() {
   print_result
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
