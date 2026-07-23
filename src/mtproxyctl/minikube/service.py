@@ -22,6 +22,7 @@ class MinikubeService:
         if not script.is_file():
             raise ConfigurationError(f"Minikube setup script is missing: {script}")
         argv = [
+            "bash",
             str(script),
             "--profile",
             request.profile,
