@@ -2,6 +2,73 @@
 
 Deploy multiple Telegram MTProxy containers behind an optional NGINX load balancer.
 
+## Python management application
+
+`mtproxyctl` provides one typed command-line interface for deployment, protected
+backups, monitoring, and the optional macOS Minikube environment. The first
+compatibility release keeps the proven Bash deployment and privileged setup
+scripts as execution backends while Python owns validation, safe backup
+handling, deployment inspection, and MTProxy metric collection.
+
+Install it from this checkout:
+
+```bash
+python3 -m pip install .
+mtproxyctl doctor
+```
+
+Run `mtproxyctl` from this checkout, pass `--project-dir PATH`, or set
+`MTPROXYCTL_PROJECT_DIR` so the compatibility release can locate its privileged
+backend scripts.
+
+Application defaults are managed by `pydantic-settings`. Copy `.env.example`
+to `.env` and adjust the `MTPROXYCTL_` variables as needed:
+
+```bash
+cp .env.example .env
+mtproxyctl deploy plan
+```
+
+Nested settings use a double underscore, for example
+`MTPROXYCTL_DEPLOYMENT__PORT_RANGE`. Real environment variables override
+values in `.env`, and explicit CLI arguments override both. Use
+`--env-file PATH` to select a different dotenv file. Keep credentials in
+protected files and configure only their paths, such as
+`MTPROXYCTL_MONITORING__TOKEN_FILE`.
+
+Preview and apply a deployment:
+
+```bash
+mtproxyctl deploy plan \
+  --port-range 30000-30009 \
+  --public-ip 203.0.113.10 \
+  --lb-port 8443
+
+mtproxyctl deploy apply \
+  --port-range 30000-30009 \
+  --public-ip 203.0.113.10 \
+  --lb-port 8443
+```
+
+Secrets are accepted through `--secret-file`, rather than as command-line
+values. All mutating command groups support a global dry-run:
+
+```bash
+mtproxyctl --dry-run deploy apply --port-range 30000-30009
+```
+
+Create, verify, and restore a versioned backup:
+
+```bash
+mtproxyctl backup create
+mtproxyctl backup verify ~/mtproxy-backups/mtproxy-TIMESTAMP-PID.tar.gz
+mtproxyctl backup restore ~/mtproxy-backups/mtproxy-TIMESTAMP-PID.tar.gz
+```
+
+The Python backup format adds per-file SHA-256 checksums and safe archive
+validation. Backups created by the existing `backup.bash` format remain
+readable.
+
 ## Usage
 
 ```bash
