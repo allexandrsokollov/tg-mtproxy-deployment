@@ -54,6 +54,36 @@ registry requests:
   --pull-policy never
 ```
 
+## Grafana Cloud monitoring
+
+`monitoring-setup.bash` configures Grafana Alloy as a system service and sends:
+
+- Linux host CPU, memory, disk, systemd, and network metrics.
+- Per-container cAdvisor metrics.
+- Docker container logs.
+- Native MTProxy `/stats` values collected without exposing port `2398`.
+
+Create a Grafana Cloud access-policy token with `metrics:write` and `logs:write`,
+save it in a protected local file, then run:
+
+```bash
+sudo ./monitoring-setup.bash \
+  --metrics-url https://PROMETHEUS-ENDPOINT/api/prom/push \
+  --metrics-user METRICS-INSTANCE-ID \
+  --logs-url https://LOKI-ENDPOINT/loki/api/v1/push \
+  --logs-user LOGS-INSTANCE-ID \
+  --token-file /protected/path/grafana-cloud-token \
+  --deployment-state /home/ubuntu/mtproxy/deployment.env
+```
+
+The endpoint URLs and instance IDs are available in Grafana Cloud under
+**Connections → Linux Server → Configure**. If Alloy already has an unmanaged
+configuration, pass `--force` to create a timestamped backup and replace it.
+
+The setup script intentionally leaves two account-level tasks in the Grafana
+Cloud UI: create a Synthetic Monitoring TCP check for the public load-balancer
+port, and route alert rules to a Telegram contact point.
+
 ## Persistent state and backups
 
 The deployment work directory (by default `~/mtproxy`) is the source of truth
