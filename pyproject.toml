@@ -1,0 +1,132 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mtproxyctl"
+version = "0.1.0"
+description = "Manage Telegram MTProxy deployment, backups, and monitoring"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "tg-mtproxy-deployment contributors" }]
+dependencies = [
+  "pydantic-settings>=2.10,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.15",
+  "pytest>=8.3",
+  "ruff>=0.11",
+]
+
+[project.scripts]
+mtproxyctl = "mtproxyctl.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests_python"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+fix = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "W",
+  "F",
+  "I",
+  "B",
+  "C4",
+  "UP",
+  "ARG",
+  "SIM",
+  "Q",
+  "N",
+  "RUF",
+  "T20",
+  "RET",
+  "PERF",
+  "PIE",
+  "PT",
+  "FLY",
+  "FURB",
+  "LOG",
+]
+extend-select = ["G004"]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.per-file-ignores]
+# Console output is the CLI module's transport boundary.
+"src/mtproxyctl/cli.py" = ["T201"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mtproxyctl"]
+force-sort-within-sections = true
+combine-as-imports = true
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "double"
+docstring-quotes = "double"
+multiline-quotes = "double"
+
+[tool.ruff.lint.flake8-pytest-style]
+fixture-parentheses = true
+mark-parentheses = true
+
+[tool.ruff.lint.pycodestyle]
+max-line-length = 100
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests_python"]
+plugins = ["pydantic.mypy"]
+exclude = [
+  "^build/",
+  "^dist/",
+  "^\\.venv/",
+]
+strict = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+strict_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+warn_unreachable = true
+no_implicit_reexport = true
+strict_equality = true
+strict_equality_for_none = true
+extra_checks = true
+local_partial_types = true
+pretty = true
+show_error_codes = true
+show_error_code_links = true
+show_column_numbers = true
+ignore_missing_imports = false
+namespace_packages = true
+incremental = true
+cache_dir = ".mypy_cache"
