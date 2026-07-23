@@ -65,6 +65,9 @@ Options:
   --dd-secret yes|no       Prefix client secret with dd. Default: yes
   --enable-lb yes|no       Start NGINX load balancer. Default: yes
   -h, --help               Show help
+
+Deployment secrets and settings are persisted in the work directory. Use
+backup.bash to create, restore, or redeploy from a protected backup.
 EOF
 }
 
@@ -222,7 +225,7 @@ parse_args() {
     CUSTOM_SECRET="${CUSTOM_SECRET,,}"
   fi
 
-  if (( LB_PORT < 1 || LB_PORT > 65535 )); then
+  if [[ ! "$LB_PORT" =~ ^[0-9]+$ ]] || (( LB_PORT < 1 || LB_PORT > 65535 )); then
     err "LB port must be between 1 and 65535"
     exit 1
   fi
@@ -261,7 +264,50 @@ parse_args() {
       ;;
   esac
 
-  if [[ "$BUILD_LOCAL_IMAGE" == "yes" && ! "$MTPROXY_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  case "$USE_DD_SECRET" in
+    yes|no)
+      ;;
+    *)
+      err "--dd-secret must be yes or no"
+      exit 1
+      ;;
+  esac
+
+  case "$ENABLE_LB" in
+    yes|no)
+      ;;
+    *)
+      err "--enable-lb must be yes or no"
+      exit 1
+      ;;
+  esac
+
+  if [[ ! "$NAME_PREFIX" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+    err "Proxy name prefix contains unsupported characters: $NAME_PREFIX"
+    exit 1
+  fi
+
+  if [[ ! "$LB_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+    err "Load balancer name contains unsupported characters: $LB_NAME"
+    exit 1
+  fi
+
+  if [[ ! "$IMAGE" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$ ]]; then
+    err "Proxy image reference contains unsupported characters: $IMAGE"
+    exit 1
+  fi
+
+  if [[ ! "$LB_IMAGE" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$ ]]; then
+    err "Load balancer image reference contains unsupported characters: $LB_IMAGE"
+    exit 1
+  fi
+
+  if [[ ! "$MTPROXY_PLATFORM" =~ ^[a-zA-Z0-9][a-zA-Z0-9_./-]*$ ]]; then
+    err "MTProxy platform contains unsupported characters: $MTPROXY_PLATFORM"
+    exit 1
+  fi
+
+  if [[ ! "$MTPROXY_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
     err "MTProxy commit must be a full 40-character hexadecimal Git commit"
     exit 1
   fi
@@ -487,6 +533,7 @@ prepare_images() {
 
 prepare_files() {
   mkdir -p "$WORKDIR"
+  chmod 700 "$WORKDIR"
   cd "$WORKDIR"
 
   if [[ ! -f proxy-secret ]]; then
@@ -514,14 +561,17 @@ prepare_files() {
   else
     log "mtproxy-secret already exists, keeping it"
   fi
+
+  chmod 600 proxy-secret proxy-multi.conf mtproxy-secret
 }
 
 load_secret() {
   SECRET="$(tr -d '\r\n' < "$WORKDIR/mtproxy-secret")"
-  if [[ -z "$SECRET" ]]; then
-    err "Secret file is empty: $WORKDIR/mtproxy-secret"
+  if [[ ! "$SECRET" =~ ^[0-9a-fA-F]{32}$ ]]; then
+    err "Secret file must contain exactly 32 hexadecimal characters: $WORKDIR/mtproxy-secret"
     exit 1
   fi
+  SECRET="${SECRET,,}"
 }
 
 prune_previous_proxies() {
@@ -674,6 +724,38 @@ install_refresh_cron() {
   ) | crontab -
 }
 
+write_deployment_state() {
+  local state_file="${WORKDIR}/deployment.env"
+  local temp_file
+
+  temp_file="$(mktemp "${WORKDIR}/.deployment.env.XXXXXX")"
+  chmod 600 "$temp_file"
+
+  {
+    echo "FORMAT_VERSION=1"
+    printf 'PORT_RANGE=%s\n' "$PORT_RANGE"
+    printf 'PUBLIC_IP=%s\n' "$PUBLIC_IP"
+    printf 'LB_PORT=%s\n' "$LB_PORT"
+    printf 'NAME_PREFIX=%s\n' "$NAME_PREFIX"
+    printf 'IMAGE=%s\n' "$IMAGE"
+    printf 'BUILD_LOCAL_IMAGE=%s\n' "$BUILD_LOCAL_IMAGE"
+    printf 'MTPROXY_COMMIT=%s\n' "$MTPROXY_COMMIT"
+    printf 'MTPROXY_PLATFORM=%s\n' "$MTPROXY_PLATFORM"
+    printf 'LB_NAME=%s\n' "$LB_NAME"
+    printf 'LB_IMAGE=%s\n' "$LB_IMAGE"
+    printf 'BUILD_LOCAL_LB_IMAGE=%s\n' "$BUILD_LOCAL_LB_IMAGE"
+    printf 'PULL_POLICY=%s\n' "$PULL_POLICY"
+    printf 'PULL_RETRIES=%s\n' "$PULL_RETRIES"
+    printf 'PULL_RETRY_DELAY=%s\n' "$PULL_RETRY_DELAY"
+    printf 'USE_DD_SECRET=%s\n' "$USE_DD_SECRET"
+    printf 'ENABLE_LB=%s\n' "$ENABLE_LB"
+  } > "$temp_file"
+
+  mv -f "$temp_file" "$state_file"
+  chmod 600 "$state_file"
+  log "Saved redeployment settings to ${state_file}"
+}
+
 print_result() {
   local ip client_secret
   ip="$PUBLIC_IP"
@@ -726,6 +808,7 @@ main() {
   deploy_from_port_range
   start_lb
   install_refresh_cron
+  write_deployment_state
   print_result
 }
 

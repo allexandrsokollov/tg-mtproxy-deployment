@@ -53,3 +53,55 @@ registry requests:
   --lb-port 8443 \
   --pull-policy never
 ```
+
+## Persistent state and backups
+
+The deployment work directory (by default `~/mtproxy`) is the source of truth
+for machine-local state:
+
+- `mtproxy-secret` is the stable client secret used by every proxy instance.
+- `proxy-secret` and `proxy-multi.conf` are Telegram runtime files.
+- `deployment.env` records the non-secret settings required to reproduce the
+  proxy range, images, public IP, and load balancer.
+- `nginx.conf` and `docker-compose.yml` record the generated load-balancer
+  configuration when the load balancer is enabled.
+
+The directory is mode `0700`; sensitive files and generated state are mode
+`0600`.
+
+Create a protected backup after deployment:
+
+```bash
+./backup.bash backup
+```
+
+By default this writes a mode-`0600` archive under `~/mtproxy-backups`, outside
+the live work directory. The archive contains credentials, so store any copied
+version using encrypted storage or an encrypted transport.
+
+Restore files into an empty work directory:
+
+```bash
+./backup.bash restore ~/mtproxy-backups/mtproxy-TIMESTAMP-PID.tar.gz
+```
+
+If the work directory already contains deployment state, restoration refuses
+to overwrite it unless `--force` is explicit. Restore and recreate all
+containers and the load balancer in one command:
+
+```bash
+./backup.bash restore ~/mtproxy-backups/mtproxy-TIMESTAMP-PID.tar.gz \
+  --force \
+  --redeploy
+```
+
+To recreate the deployment later from the existing live state without first
+restoring an archive:
+
+```bash
+./backup.bash redeploy
+```
+
+The backup intentionally excludes Docker images: local images can be rebuilt
+from this checkout at the pinned MTProxy commit. If a deployment uses private
+external images, preserve the registry credentials separately.

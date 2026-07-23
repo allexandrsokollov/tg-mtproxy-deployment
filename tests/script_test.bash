@@ -204,6 +204,41 @@ test_proxy_image_failure_stops_load_balancer_preflight() {
   fi
 }
 
+test_deployment_state_excludes_secret() {
+  reset_fixture
+  WORKDIR="${TEST_TMP_DIR}/state-workdir"
+  mkdir -p "$WORKDIR"
+  PORT_RANGE="30000-30009"
+  PUBLIC_IP="203.0.113.10"
+  LB_PORT=8443
+  NAME_PREFIX="proxy"
+  IMAGE="tg-mtproxy:local"
+  BUILD_LOCAL_IMAGE="yes"
+  MTPROXY_PLATFORM="linux/amd64"
+  LB_NAME="mtproxy-lb"
+  LB_IMAGE="tg-mtproxy-nginx:local"
+  BUILD_LOCAL_LB_IMAGE="yes"
+  PULL_POLICY="missing"
+  PULL_RETRIES=3
+  PULL_RETRY_DELAY=5
+  USE_DD_SECRET="yes"
+  ENABLE_LB="yes"
+  SECRET="0123456789abcdef0123456789abcdef"
+
+  write_deployment_state >/dev/null
+
+  grep -Fqx 'PORT_RANGE=30000-30009' "${WORKDIR}/deployment.env"
+  grep -Fqx 'ENABLE_LB=yes' "${WORKDIR}/deployment.env"
+  if grep -Fq "$SECRET" "${WORKDIR}/deployment.env"; then
+    echo "Secret value was written to deployment settings" >&2
+    return 1
+  fi
+
+  local mode
+  mode="$(stat -c '%a' "${WORKDIR}/deployment.env" 2>/dev/null || stat -f '%Lp' "${WORKDIR}/deployment.env")"
+  [[ "$mode" == "600" ]]
+}
+
 test_failed_preflight_does_not_prune_containers() {
   reset_fixture
   local prune_marker="${TEST_TMP_DIR}/pruned"
@@ -251,4 +286,5 @@ run_test "never policy requires cached image" test_never_policy_requires_cached_
 run_test "load balancer image is preflighted" test_load_balancer_image_is_preflighted_when_enabled
 run_test "local load balancer image is built" test_local_load_balancer_image_is_built
 run_test "proxy image failure stops load balancer preflight" test_proxy_image_failure_stops_load_balancer_preflight
+run_test "deployment state excludes secret" test_deployment_state_excludes_secret
 run_test "failed preflight does not prune containers" test_failed_preflight_does_not_prune_containers
