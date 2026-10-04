@@ -17,6 +17,9 @@ port (default: 443). Prints the Telegram connection URL when ready.
 
 The public IPv4 is detected automatically. A generated secret is retained
 across deployments. WORKDIR defaults to /var/lib/mtproxy.
+MTPROXY_NETWORK selects an existing Docker network (default: bridge).
+MTPROXY_EGRESS_IP sets the outbound public IPv4 when using a VPN gateway;
+it defaults to the public IPv4 and does not change the connection URL.
 Rerunning replaces this script's containers and restarts its load balancer.
 EOF
 }
@@ -126,12 +129,14 @@ stream {
         least_conn;
 EOF
     for ((index = 1; index <= cpu_count; index++)); do
+      # Explicit loopback ports survive Docker restarts and keep Nginx in sync.
+      backend_port=$((31000 + index))
       docker run -d --platform linux/amd64 --name "mtproxy-$index" \
         --label mtproxy.single-file=true --restart unless-stopped --cpus 1 \
-        -p '127.0.0.1::443' \
+        --network "$proxy_network" -p "127.0.0.1:$backend_port:443" \
         -v "$state_dir/proxy-secret:/data/proxy-secret:ro" \
         -v "$state_dir/proxy-multi.conf:/data/proxy-multi.conf:ro" \
-        -e "SECRET=$secret" -e "PUBLIC_IP=$public_ip" \
+        -e "SECRET=$secret" -e "PUBLIC_IP=$egress_ip" \
         tg-mtproxy:single-file >&2
       binding=$(docker port "mtproxy-$index" 443/tcp)
       [[ $binding =~ ^127\.0\.0\.1:([0-9]+)$ ]] || die 'Unexpected Docker port binding.'
@@ -190,6 +195,8 @@ main() {
   port=443
   secret=''
   state_dir=${WORKDIR:-/var/lib/mtproxy}
+  proxy_network=${MTPROXY_NETWORK:-bridge}
+  egress_ip=${MTPROXY_EGRESS_IP:-}
   while (($#)); do
     case $1 in
       --public-ip | --port | --secret)
@@ -212,6 +219,8 @@ main() {
   port=$((10#$port))
   ((port >= 1 && port <= 65535)) || die 'Port must be between 1 and 65535.'
   [[ -z $public_ip ]] || valid_ipv4 "$public_ip" || die 'Invalid public IPv4.'
+  [[ -z $egress_ip ]] || valid_ipv4 "$egress_ip" || die 'Invalid outbound IPv4.'
+  [[ $proxy_network =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || die 'Invalid Docker network name.'
   [[ -z $secret || $secret =~ ^[0-9a-fA-F]{32}$ ]] || die 'Secret must be 32 hex characters.'
   [[ $state_dir =~ ^/[a-zA-Z0-9_./-]+$ && $state_dir != / ]] \
     || die 'WORKDIR must be an absolute path without spaces or special characters.'
@@ -224,11 +233,13 @@ main() {
   unset OMP_NUM_THREADS OMP_THREAD_LIMIT
   cpu_count=$(nproc)
   [[ $cpu_count =~ ^[1-9][0-9]*$ ]] || die 'Unable to determine available CPU cores.'
+  ((${#cpu_count} <= 5 && cpu_count <= 34535)) || die 'Too many cores for the backend port range.'
   install_dependencies
   if [[ -z $public_ip ]]; then
     public_ip=$(curl -4 -fsS --connect-timeout 10 --max-time 20 https://api.ipify.org)
     valid_ipv4 "$public_ip" || die 'IP detection failed; pass --public-ip IPv4.'
   fi
+  egress_ip=${egress_ip:-$public_ip}
   prepare_files
   build_image
   deploy_containers
